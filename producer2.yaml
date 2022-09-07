@@ -1,0 +1,324 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Producer 2 account Lake Formation setup for data mesh architecture.
+
+Parameters:
+  ProducerUsername:
+    Type: String
+    Description: IAM user name to be created for producer.
+    Default: Producer
+    AllowedPattern: '[\w+=,.@-]+'
+    MinLength: '1'
+    MaxLength: '64'
+    ConstraintDescription: Name must be between 1 and 64 characters
+  ProducerPassword:
+    Type: String
+    NoEcho: 'true'
+    AllowedPattern: >-
+      ^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+-\[\]\{\}|???])[A-Za-z\d!@#$%^&*()_+-\[\]\{\}|???]{8,}$
+    ConstraintDescription: >-
+      Password should be a min. of 8 characters, include a min. of three of the
+      following mix of character types: uppercase, lowercase, numbers,
+      non-alphanumeric symbols
+    Description: >-
+      Password for Producer 2 IAM user. Should be a min. of 8 characters, include
+      a min. of three of the following mix of character types: uppercase,
+      lowercase, numbers, non-alphanumeric symbols, for example
+      !@#$%^&*()_+-[]{}|??? and not be identical to your AWS account name or
+      email address
+  CentralGovernanceAccountID:
+    Type: String
+    Description: Account Number of the Central Governance account.
+  CentralGovernanceAccountLFServiceRoleName:
+    Type: String
+    Description: Name of RegisterLocationServiceRole IAM role created in the Central Governance account.
+
+Resources: 
+  ProducerUser:
+    Type: 'AWS::IAM::User'
+    Properties:
+      Path: /
+      LoginProfile:
+        Password: !Ref ProducerPassword
+        PasswordResetRequired: false
+      UserName: !Ref ProducerUsername
+
+  ProducerUserGroup:
+    Type: 'AWS::IAM::Group'
+    Properties:
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AWSLakeFormationCrossAccountManager'
+      Path: /
+      Policies:
+        - PolicyName: LF-DataLake-Admin-Policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'lakeformation:*'
+                  - 'cloudtrail:DescribeTrails'
+                  - 'cloudtrail:LookupEvents'
+                  - 'glue:GetDatabase'
+                  - 'glue:CreateDatabase'
+                  - 'glue:UpdateDatabase'
+                  - 'glue:DeleteDatabase'
+                  - 'glue:SearchTables'
+                  - 'glue:CreateTable'
+                  - 'glue:UpdateTable'
+                  - 'glue:DeleteTable'
+                  - 'glue:Get*'
+                  - 'glue:List*'
+                  - 'glue:BatchGetWorkflows'
+                  - 'glue:DeleteWorkflow'
+                  - 'glue:GetWorkflowRuns'
+                  - 'glue:StartWorkflowRun'
+                  - 'glue:GetWorkflow'
+                  - 's3:ListBucket'
+                  - 's3:GetBucketLocation'
+                  - 's3:ListAllMyBuckets'
+                  - 's3:GetBucketAcl'
+                  - 's3:GetBucketPolicy'
+                  - 's3:GetBucketPolicyStatus'
+                  - 's3:PutBucketPolicy'
+                  - 's3:DeleteBucketPolicy'
+                  - 'access-analyzer:ValidatePolicy'
+                  - 'iam:ListUsers'
+                  - 'iam:ListRoles'
+                  - 'iam:GetRole'
+                  - 'iam:GetRolePolicy'
+                  - 'iam:PutRolePolicy'
+                  - 'iam:CreateServiceLinkedRole'
+                  - 'cloudformation:*'
+                  - 'elasticmapreduce:*'
+                  - 'tag:Get*'
+                  - 'glue:BatchGetCrawlers'
+                  - 'glue:StartCrawler'
+                  - 'glue:UpdateCrawler'
+                  - 'iam:Passrole'
+                  - 'cloudshell:*'
+                Resource: '*'
+
+  AddProducerToGroup:
+    Type: 'AWS::IAM::UserToGroupAddition'
+    Properties:
+      GroupName: !Ref ProducerUserGroup
+      Users:
+        - !Ref ProducerUser
+    DependsOn:
+      - ProducerUserGroup
+      - ProducerUser
+  
+  LFDataLakeSettings:
+    Type: AWS::LakeFormation::DataLakeSettings
+    Properties:
+      Admins:
+        - DataLakePrincipalIdentifier: !GetAtt 'ProducerUser.Arn'
+  
+  LoadS3BucketRole:
+    Type: "AWS::IAM::Role"
+    Properties:     
+        AssumeRolePolicyDocument: 
+          Version: "2012-10-17"
+          Statement: 
+            - Effect: "Allow"
+              Principal: 
+                Service: 
+                  - "lambda.amazonaws.com"
+              Action: 
+                - "sts:AssumeRole"
+        Path: "/"
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+          - !Ref LoadS3Policy
+
+  LoadS3Policy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: S3 and KMS access for the Lambda function to upload data.
+      Path: /
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !GetAtt retailS3Bucket.Arn
+              - !Join [ '', [!GetAtt retailS3Bucket.Arn, '/*']]
+              - "arn:aws:s3:::aws-bigdata-blog/*"
+          - Effect: "Allow"
+            Action:
+              - lakeformation:*
+            Resource: '*'
+
+  DataLakeSettingsLambda:
+    Type: AWS::LakeFormation::DataLakeSettings
+    DependsOn: 
+      - LoadS3BucketRole
+    Properties:
+      Admins:
+        - DataLakePrincipalIdentifier: !GetAtt 'LoadS3BucketRole.Arn'
+     
+  LoadDataBucketLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: 
+      - LoadS3Policy
+      - GlueServiceRole
+    Properties:
+      Description: Lambda function that uploads data to card S3 bucket.
+      Handler: index.handler
+      Runtime: python3.7
+      Timeout: 300
+      Role: !GetAtt LoadS3BucketRole.Arn
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+          import cfnresponse
+          def handler(event, context):
+            try:
+              customer_bucket_name = os.environ.get("CUSTOMER_DATA_BUCKET")
+              central_governance_account_id = os.environ.get("CENTRAL_GOVERNANCE_ACCOUNT_ID")
+              lf_principal = os.environ.get("GLUE_SERVICE_ROLE")
+              source_bucket = 'aws-bigdata-blog'
+              # copy data to customer s3 bucket
+              s3 = boto3.resource('s3')
+              customer_info_copy_source = {
+                  'Bucket': source_bucket,
+                  'Key': 'artifacts/lakeformationtbac/sample_data/customer_info.csv'
+              }
+              customer_review_copy_source = {
+                  'Bucket': source_bucket,
+                  'Key': 'artifacts/lakeformationtbac/sample_data/part-00000-495c48e6-96d6-4650-aa65-3c36a3516ddd.c000.snappy.parquet'
+              }
+              bucket = s3.Bucket(customer_bucket_name)
+              bucket.copy(customer_info_copy_source, 'customers/customer_info.csv')
+              bucket.copy(customer_review_copy_source, 'reviews/part-00000-495c48e6-96d6-4650-aa65-3c36a3516ddd.c000.snappy.parquet')
+              #Grant permissions on the S3 bucket locations corresponding to retail producer to the AWS Glue crawler role.
+              lf_client = boto3.client('lakeformation')
+              customer_bucket_arn = 'arn:aws:s3:::' + customer_bucket_name
+              lf_client.grant_permissions(
+                Principal={
+                    'DataLakePrincipalIdentifier': lf_principal
+                },
+                Resource={
+                  'DataLocation' : {
+                    'CatalogId': central_governance_account_id,
+                    'ResourceArn': customer_bucket_arn
+                  }
+                },
+                Permissions=['CREATE_TABLE_READ_WRITE']
+              )
+              # signal
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, context.log_stream_name)
+            except Exception as err:
+              print("Error in Custom Resource", err)
+              # signal
+              cfnresponse.send(event, context, cfnresponse.FAILED, {}, context.log_stream_name)
+      Environment:
+        Variables:
+          CUSTOMER_DATA_BUCKET: !Ref retailS3Bucket
+          CENTRAL_GOVERNANCE_ACCOUNT_ID: !Ref CentralGovernanceAccountID
+          GLUE_SERVICE_ROLE: !GetAtt GlueServiceRole.Arn
+            
+  LoadDataBucket: 
+      Type: Custom::LoadDataBucket
+      Properties:
+        ServiceToken: !GetAtt LoadDataBucketLambda.Arn
+
+  retailS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties: 
+      AccessControl: Private
+      BucketName: !Sub "retail-${AWS::AccountId}-${AWS::Region}"                
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  retailS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref retailS3Bucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS:
+                - !Sub 'arn:aws:iam::${CentralGovernanceAccountID}:role/${CentralGovernanceAccountLFServiceRoleName}'
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+              - s3:ListBucket
+            Resource:
+              - !Sub ${retailS3Bucket.Arn}/*
+              - !Sub ${retailS3Bucket.Arn}
+  
+  GlueServiceRole:
+    Type: AWS::IAM::Role
+    Properties :
+      Description: IAM Role to crawl for files in the Amazon S3 data lake.
+      AssumeRolePolicyDocument:
+        Version : 2012-10-17
+        Statement :
+          -
+            Effect : Allow
+            Principal :
+              Service :
+                - glue.amazonaws.com
+                - lakeformation.amazonaws.com
+            Action :
+              - sts:AssumeRole
+      Path: /    
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+        - !Ref GlueCrawlerS3Policy
+
+  GlueCrawlerS3Policy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Glue Crawler policy to access source S3 buckets.
+      Path: /
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - 's3:GetObject'
+              - 's3:ListBucket'
+            Resource:
+              - !GetAtt retailS3Bucket.Arn
+              - !Join [ '', [!GetAtt retailS3Bucket.Arn, '/*']]
+
+  GlueCrawlerRetail:
+    DependsOn:
+      - retailS3Bucket
+      - LoadDataBucket
+    Type: AWS::Glue::Crawler
+    Properties:
+        Role: !GetAtt GlueServiceRole.Arn
+        Name: !Sub "retailCrawler-${AWS::AccountId}"
+        DatabaseName: 'retail'
+        Targets:
+          S3Targets:
+            - Path: !Join [ '', [!Ref retailS3Bucket, '/retail']]
+
+Outputs:
+  retailS3Bucket:
+    Description: Name of S3 bucket storing retail data 
+    Value: !Ref retailS3Bucket
+  ProducerUserId:
+    Description: User ID for Producer Steward User
+    Value: Producer
+  GlueServiceRole:
+    Description: Name of Glue service IAM role 
+    Value: !Ref GlueServiceRole
+  GlueCrawlerRetail:
+    Description: Name of crawler for retail database 
+    Value: !Ref GlueCrawlerRetail

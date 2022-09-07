@@ -1,0 +1,251 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Central governance account Lake Formation setup for data mesh architecture.
+
+Parameters:
+  DataMeshOwnerUserName:
+    Type: String
+    Description: IAM user name to be created for data lake owner.
+    Default: DataMeshOwner
+    AllowedPattern: '[\w+=,.@-]+'
+    MinLength: '1'
+    MaxLength: '64'
+    ConstraintDescription: the user name must be between 1 and 64 characters
+  DataMeshOwnerPassword:
+    Type: String
+    Description: IAM user console password for data lake owner.
+    NoEcho: 'true'
+    AllowedPattern: >-
+      ^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+-\[\]\{\}|???])[A-Za-z\d!@#$%^&*()_+-\[\]\{\}|???]{8,}$
+    ConstraintDescription: >-
+      Password should be a min. of 8 characters, include a min. of three of the
+      following mix of character types: uppercase, lowercase, numbers,
+      non-alphanumeric symbols
+    Description: >-
+      Password for Data Mesh Owner. Should be a min. of 8 characters, include
+      a min. of three of the following mix of character types: uppercase,
+      lowercase, numbers, non-alphanumeric symbols, for example
+      !@#$%^&*()_+-[]{}|??? and not be identical to your AWS account name or
+      email address
+  Producer1AWSAccount:
+    Type: String
+    Description: Account Number of the Producer 1 account.
+  Producer2AWSAccount:
+    Type: String
+    Description: Account Number of the Producer 2 account.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: IAM User Configuration
+        Parameters:
+          - DataMeshOwnerUserName
+          - DataMeshOwnerPassword
+      -
+        Label:
+          default: Data Lake Configuration
+        Parameters:
+          - Producer1AWSAccount
+          - Producer2AWSAccount
+
+Resources:
+  DatalakeAdminGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSLakeFormationCrossAccountManager
+        - arn:aws:iam::aws:policy/AmazonAthenaFullAccess
+      Policies:
+      - PolicyDocument:
+          Statement:
+            - Action:
+                - 'lakeformation:*'
+                - 'cloudtrail:DescribeTrails'
+                - 'cloudtrail:LookupEvents'
+                - 'glue:GetDatabase'
+                - 'glue:CreateDatabase'
+                - 'glue:UpdateDatabase'
+                - 'glue:DeleteDatabase'
+                - 'glue:SearchTables'
+                - 'glue:CreateTable'
+                - 'glue:UpdateTable'
+                - 'glue:DeleteTable'
+                - 'glue:Get*'
+                - 'glue:List*'
+                - 'glue:BatchGetWorkflows'
+                - 'glue:DeleteWorkflow'
+                - 'glue:GetWorkflowRuns'
+                - 'glue:StartWorkflowRun'
+                - 'glue:GetWorkflow'
+                - 's3:ListBucket'
+                - 's3:GetBucketLocation'
+                - 's3:ListAllMyBuckets'
+                - 's3:GetBucketAcl'
+                - 'iam:ListUsers'
+                - 'iam:ListRoles'
+                - 'iam:GetRole'
+                - 'iam:GetRolePolicy'
+                - 'iam:PutRolePolicy'
+                - 'iam:CreateServiceLinkedRole'
+                - 'cloudformation:*'
+                - 'elasticmapreduce:*'
+                - 'tag:Get*'
+                - 'glue:BatchGetCrawlers'
+              Effect: Allow
+              Resource: '*'
+        PolicyName: DatalakeAdminGroupPolicy
+
+  DatalakeAdminUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Ref DataMeshOwnerUserName
+      LoginProfile:
+        Password: !Ref DataMeshOwnerPassword
+      Groups:
+        - !Ref DatalakeAdminGroup
+
+  DataLakeSettings:
+    Type: AWS::LakeFormation::DataLakeSettings
+    Properties:
+      Admins:
+        - DataLakePrincipalIdentifier: !GetAtt 'DatalakeAdminUser.Arn'
+
+  DataLakeLocationCard:
+    Type: AWS::LakeFormation::Resource
+    Properties:
+      ResourceArn: !Sub arn:aws:s3:::cards-${Producer1AWSAccount}-${AWS::Region}
+      RoleArn: !GetAtt 'RegisterLocationServiceRole.Arn'
+      UseServiceLinkedRole: false
+  
+  DataLakeLocationRetail:
+    Type: AWS::LakeFormation::Resource
+    Properties:
+      ResourceArn: !Sub arn:aws:s3:::retail-${Producer2AWSAccount}-${AWS::Region}
+      RoleArn: !GetAtt 'RegisterLocationServiceRole.Arn'
+      UseServiceLinkedRole: false
+  
+  GlueCardDatabase:
+    Type: AWS::Glue::Database
+    Properties: 
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput: 
+        Name: cards
+
+  CardDatabasePermissions:
+    DependsOn: GlueCardDatabase
+    Type: AWS::LakeFormation::Permissions
+    Properties:
+      DataLakePrincipal:
+        DataLakePrincipalIdentifier: !GetAtt 'DatalakeAdminUser.Arn'
+      Permissions:
+        - ALL
+      PermissionsWithGrantOption:
+        - ALL
+      Resource:
+        DatabaseResource:
+          Name: !Ref GlueCardDatabase
+  
+  CardDataLocationPermissions:
+    DependsOn: DataLakeLocationCard
+    Type: AWS::LakeFormation::Permissions
+    Properties:
+      DataLakePrincipal:
+        DataLakePrincipalIdentifier: !Ref Producer1AWSAccount
+      Permissions: 
+        - DATA_LOCATION_ACCESS
+      PermissionsWithGrantOption: 
+        - DATA_LOCATION_ACCESS
+      Resource:
+        DataLocationResource:
+          S3Resource: !Sub arn:aws:s3:::cards-${Producer1AWSAccount}-${AWS::Region}
+
+  GlueRetailDatabase:
+    Type: AWS::Glue::Database
+    Properties: 
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput: 
+        Name: retail
+
+  RetailDatabasePermissions:
+    DependsOn: GlueRetailDatabase
+    Type: AWS::LakeFormation::Permissions
+    Properties:
+      DataLakePrincipal:
+        DataLakePrincipalIdentifier: !GetAtt 'DatalakeAdminUser.Arn'
+      Permissions:
+        - ALL
+      PermissionsWithGrantOption:
+        - ALL
+      Resource:
+        DatabaseResource:
+          Name: !Ref GlueRetailDatabase
+  
+  RetailDataLocationPermissions:
+    DependsOn: DataLakeLocationRetail
+    Type: AWS::LakeFormation::Permissions
+    Properties:
+      DataLakePrincipal:
+        DataLakePrincipalIdentifier: !Ref Producer2AWSAccount
+      Permissions: 
+        - DATA_LOCATION_ACCESS
+      PermissionsWithGrantOption: 
+        - DATA_LOCATION_ACCESS
+      Resource:
+        DataLocationResource:
+          S3Resource: !Sub arn:aws:s3:::retail-${Producer2AWSAccount}-${AWS::Region}
+
+  RegisterLocationServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lakeformation.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+
+  S3DataLakePolicy:
+    DependsOn: RegisterLocationServiceRole
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: "S3DataLakePolicy"
+      PolicyDocument: 
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action:
+              - lakeformation:RegisterResource
+            Resource: 
+              - !Sub arn:aws:s3:::cards-${Producer1AWSAccount}-${AWS::Region}
+              - !Sub arn:aws:s3:::retail-${Producer2AWSAccount}-${AWS::Region}
+          -
+            Effect: "Allow"
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource: 
+              - !Sub arn:aws:s3:::cards-${Producer1AWSAccount}-${AWS::Region}/*
+              - !Sub arn:aws:s3:::retail-${Producer2AWSAccount}-${AWS::Region}/*
+          -
+            Effect: "Allow"
+            Action:
+              - s3:ListBucket
+            Resource: 
+              - !Sub arn:aws:s3:::cards-${Producer1AWSAccount}-${AWS::Region}
+              - !Sub arn:aws:s3:::retail-${Producer2AWSAccount}-${AWS::Region}
+      Roles: 
+        - !Ref RegisterLocationServiceRole
+
+Outputs:
+  DatalakeAdminGroup:
+    Value: !Ref DatalakeAdminGroup
+  DatalakeAdminUser:
+    Value: !Ref DatalakeAdminUser
+  RegisterLocationServiceRole:
+    Value: !Ref RegisterLocationServiceRole
